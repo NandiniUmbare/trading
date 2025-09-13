@@ -2,39 +2,46 @@ import backtrader as bt
 import pandas as pd
 import random
 from datetime import datetime, timedelta
-from pya3 import *
+from breeze_connect import BreezeConnect
+import urllib
 
-# Global Alice Blue client
-alice = None
+# Global Breeze client
+breeze = None
 
-# --- Alice Blue Login ---
-def alice_blue_login():
+# --- ICICI Direct (Breeze) Login ---
+def icici_direct_login():
     """
-    Handles the login process for Alice Blue.
+    Handles the login process for ICICI Direct's Breeze API.
     """
-    global alice
-    print("--- Login to Alice Blue ---")
+    global breeze
+    print("--- Login to ICICI Direct (Breeze API) ---")
 
-    # It's recommended to store these securely, e.g., in environment variables or a config file
     try:
-        user_id = input("Enter your Alice Blue User ID: ")
-        api_key = input("Enter your Alice Blue API Key: ")
+        api_key = input("Enter your Breeze API Key: ")
+        secret_key = input("Enter your Breeze Secret Key: ")
 
-        alice = Aliceblue(user_id=user_id, api_key=api_key)
-        session_id = alice.get_session_id()
+        breeze = BreezeConnect(api_key=api_key)
 
-        if session_id['status'] == 'Success':
-            print("\nAlice Blue Login Successful!")
-            print(f"Session ID: {session_id['sessionID']}")
-        else:
-            print(f"\nLogin failed: {session_id.get('emsg', 'Unknown error')}")
-            alice = None
+        # Generate login URL and print it for the user
+        login_url = f"https://api.icicidirect.com/apiuser/login?api_key={urllib.parse.quote_plus(api_key)}"
+        print("\nPlease open the following URL in your browser to login:")
+        print(login_url)
+
+        # The user will be redirected with a session_token.
+        session_token = input("\nEnter the api_session (session_token) from the redirect URL: ")
+
+        # Generate session
+        breeze.generate_session(api_secret=secret_key, session_token=session_token)
+
+        print("\nICICI Direct Login Successful!")
+        # You can now make other API calls, e.g., get customer details
+        # print(breeze.get_customer_details(api_session=session_token))
 
     except Exception as e:
-        print(f"\nAn error occurred during login: {e}")
-        alice = None
+        print(f"\nLogin failed: {e}")
+        breeze = None
 
-    return alice
+    return breeze
 
 
 # --- Trading Strategy ---
@@ -117,45 +124,49 @@ class EmaStrategy(bt.Strategy):
                 self.order = self.sell()
 
 
-# --- Data Fetching from Alice Blue ---
-def get_historical_data(alice, symbol, from_date, to_date, interval='60', exchange='NSE'):
+# --- Data Fetching from ICICI Direct (Breeze) ---
+def get_historical_data(breeze, symbol, from_date, to_date, interval='1day', exchange='NSE'):
     """
-    Fetches historical data from Alice Blue.
+    Fetches historical data from ICICI Direct's Breeze API.
     """
     print(f"--- Fetching data for {symbol} ---")
     try:
-        instrument = alice.get_instrument_by_symbol(exchange, symbol)
-        if not instrument:
-            print(f"Could not find instrument for {symbol}")
-            return None
+        # Convert datetimes to the required ISO format string
+        from_iso = from_date.isoformat()[:19] + '.000Z'
+        to_iso = to_date.isoformat()[:19] + '.000Z'
 
-        candles = alice.get_historical(instrument, from_date, to_date, interval, indices=False)
+        candles = breeze.get_historical_data_v2(
+            interval=interval,
+            from_date=from_iso,
+            to_date=to_iso,
+            stock_code=symbol,
+            exchange_code=exchange,
+            product_type="cash"
+        )
 
-        if not candles:
-            print(f"No data received for {symbol}")
+        if not candles or candles.get('Success') is None:
+            print(f"No data received for {symbol} or request failed.")
+            if candles.get('Error'):
+                print(f"API Error: {candles.get('Error')}")
             return None
 
         # Convert to pandas DataFrame
-        df = pd.DataFrame(candles)
+        df = pd.DataFrame(candles['Success'])
 
-        # The pya3 documentation is not explicit on the column names,
-        # but based on common formats, we assume the following.
-        # You may need to adjust this based on the actual output.
-        df['datetime'] = pd.to_datetime(df['time'])
-        df.set_index('datetime', inplace=True)
-        df.rename(columns={
-            'open': 'open',
-            'high': 'high',
-            'low': 'low',
-            'close': 'close',
-            'volume': 'volume'
-        }, inplace=True)
-
-        # Ensure required columns are present
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        if not all(col in df.columns for col in required_cols):
-            print(f"Historical data for {symbol} is missing one of the required columns: {required_cols}")
+        if df.empty:
+            print(f"No historical data returned for {symbol}")
             return None
+
+        # The breeze documentation shows the datetime key is 'datetime'
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df.set_index('datetime', inplace=True)
+
+        # Ensure data types are correct for backtrader
+        df['open'] = pd.to_numeric(df['open'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
+        df['close'] = pd.to_numeric(df['close'])
+        df['volume'] = pd.to_numeric(df['volume'])
 
         return df[['open', 'high', 'low', 'close', 'volume']]
 
@@ -176,9 +187,9 @@ class FixedCashAmount(bt.Sizer):
 
 # --- Main Execution ---
 def run_backtest():
-    # --- Login to Alice Blue ---
-    global alice
-    if not alice_blue_login():
+    # --- Login to ICICI Direct (Breeze) ---
+    global breeze
+    if not icici_direct_login():
         return
 
     # --- Backtest Setup ---
@@ -192,11 +203,6 @@ def run_backtest():
         print("Error: nifty500.txt not found. Please create this file.")
         return
 
-    # Download master contract
-    print("Downloading master contract for NSE...")
-    alice.get_contract_master('NSE')
-    print("Master contract downloaded.")
-
     symbols_to_run = symbols[:5]  # Running on first 5 symbols for demonstration
     print(f"Running backtest for: {', '.join(symbols_to_run)}")
 
@@ -205,7 +211,7 @@ def run_backtest():
     from_date = to_date - timedelta(days=365) # 1 year of data
 
     for symbol in symbols_to_run:
-        dataframe = get_historical_data(alice, symbol, from_date, to_date, interval='60')
+        dataframe = get_historical_data(breeze, symbol, from_date, to_date, interval='1day')
         if dataframe is not None and not dataframe.empty:
             data = bt.feeds.PandasData(dataname=dataframe, name=symbol)
             cerebro.adddata(data, name=symbol)

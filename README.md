@@ -26,25 +26,28 @@ The `backtester.py` script is designed to backtest a trading strategy based on t
 
 ### How to Run the Backtester
 
-1.  **Install Dependencies:**
+1.  **Get API Credentials:**
+    *   Go to the [ICICI Direct Breeze API page](https://www.icicidirect.com/futures-and-options/api/breeze) and register for an app to get your `api_key` and `secret_key`.
+
+2.  **Install Dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
 
-2.  **Run the Script:**
+3.  **Run the Script:**
     ```bash
     python3 backtester.py
     ```
 
-3.  **Login to Alice Blue:**
-    When you run the script, it will prompt you for your Alice Blue credentials:
-    - `User ID`
-    - `API Key`
-
-    Enter your credentials to allow the script to fetch historical data.
+4.  **Login to ICICI Direct (Breeze):**
+    *   When you run the script, it will prompt you for your `api_key` and `secret_key`.
+    *   It will then display a login URL. Copy this URL and open it in your browser.
+    *   Log in with your ICICI Direct credentials.
+    *   After logging in, you will be redirected to a new URL. Copy the `api_session` (session token) from this URL.
+    *   Paste the `api_session` back into the terminal when prompted.
 
 ### **NOTE**
-The backtester is configured to fetch 1 year of 1-hour data for the first 5 stocks in `nifty500.txt`. You can modify these settings in the `run_backtest` function in `backtester.py`.
+The backtester is configured to fetch 1 year of **daily** data for the first 5 stocks in `nifty500.txt`. The 1-hour interval was not directly available in the historical API, so daily data is used. You can modify these settings in the `run_backtest` function in `backtester.py`.
 
 ## 2. Kite Trading Terminal
 

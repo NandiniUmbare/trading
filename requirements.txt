@@ -1,4 +1,4 @@
-pya3
+breeze-connect
 backtrader
 pandas
 requests
