@@ -1,10 +1,11 @@
 import configparser
 import time
 import logging
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 import pandas as pd
 from kiteconnect import KiteConnect, KiteException
 import numpy as np
+import os
 
 # --- Configuration ---
 CONFIG_FILE = 'config.ini'
@@ -32,6 +33,7 @@ def kite_login(config):
     try:
         api_key = config['KITE']['API_KEY']
         api_secret = config['KITE']['API_SECRET']
+
         access_token = config['KITE'].get('ACCESS_TOKEN')
 
         kite = KiteConnect(api_key=api_key)
@@ -40,10 +42,10 @@ def kite_login(config):
             try:
                 kite.set_access_token(access_token)
                 kite.profile()
-                logging.info("Logged in successfully using saved access token.")
+                logging.info("Logged in successfully using existing access token.")
                 return kite
-            except KiteException as e:
-                logging.warning(f"Saved token invalid: {e}. Attempting full login.")
+            except KiteException:
+                logging.warning("Saved token invalid. Attempting full login.")
 
         print("Please open this URL and authorize the app:", kite.login_url())
         request_token = input("Enter the request_token from the redirect URL: ")
@@ -61,72 +63,71 @@ def kite_login(config):
         return None
 
 # --- Core Trading Logic ---
-def get_stock_of_the_day(kite, stock_list):
+def get_top_stocks(kite, stock_list):
     try:
         instruments = [f"NSE:{stock}" for stock in stock_list]
         quotes = kite.quote(instruments)
 
         if not quotes:
             logging.error("Could not fetch quotes for the stock list.")
-            return None
+            return [], []
 
-        max_change = -100
-        top_stock = None
+        stock_changes = []
         for stock in stock_list:
             instrument = f"NSE:{stock}"
             if instrument in quotes and quotes[instrument]['last_price'] > 0:
                 ohlc = quotes[instrument]['ohlc']
-                # Correctly calculate intraday change from the day's open price
-                change = (quotes[instrument]['last_price'] / ohlc['open'] - 1) * 100
-                if change > max_change:
-                    max_change = change
-                    top_stock = stock
+                if ohlc['open'] > 0:
+                    change = (quotes[instrument]['last_price'] / ohlc['open'] - 1) * 100
+                    stock_changes.append({'symbol': stock, 'change': change})
 
-        if top_stock:
-            logging.info(f"Stock of the day: {top_stock} with {max_change:.2f}% change.")
-            return top_stock
-        else:
-            logging.warning("Could not determine top stock of the day.")
-            return None
+        sorted_stocks = sorted(stock_changes, key=lambda x: x['change'], reverse=True)
+
+        top_gainers = sorted_stocks[:3]
+        top_losers = sorted_stocks[-3:]
+
+        logging.info(f"Top 3 Gainers: {[g['symbol'] for g in top_gainers]}")
+        logging.info(f"Top 3 Losers: {[l['symbol'] for l in top_losers]}")
+
+        return [g['symbol'] for g in top_gainers], [l['symbol'] for l in top_losers]
 
     except Exception as e:
-        logging.error(f"Error getting stock of the day: {e}")
-        return None
+        logging.error(f"Error getting top stocks: {e}")
+        return [], []
 
-def fetch_historical_data(kite, instrument_token, interval='5minute'):
+def fetch_and_calculate_avwap(kite, stock, std_dev_multiplier):
     try:
-        # By default, fetch data for the current trading day.
-        # Kite API fetches data up to the current time.
+        instrument_token = kite.ltp(f"NSE:{stock}")[f"NSE:{stock}"]["instrument_token"]
         from_date = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
         to_date = datetime.now()
-        records = kite.historical_data(instrument_token, from_date, to_date, interval, continuous=False, oi=False)
+        records = kite.historical_data(instrument_token, from_date, to_date, "5minute")
 
         if not records:
+            logging.warning(f"No historical data for {stock}")
             return None
 
         df = pd.DataFrame(records)
         df['date'] = pd.to_datetime(df['date'])
-        return df
+
+        df['tp'] = (df['high'] + df['low'] + df['close']) / 3
+        df['tpv'] = df['tp'] * df['volume']
+        df['cum_tpv'] = df['tpv'].cumsum()
+        df['cum_volume'] = df['volume'].cumsum()
+        df['avwap'] = df['cum_tpv'] / df['cum_volume']
+
+        df['sq_diff'] = ((df['close'] - df['avwap']) ** 2)
+        df['cum_sq_diff'] = df['sq_diff'].cumsum()
+        df['mean_sq_err'] = df['cum_sq_diff'] / (np.arange(len(df)) + 1)
+        df['std_dev'] = np.sqrt(df['mean_sq_err'])
+
+        df['upper_band'] = df['avwap'] + (df['std_dev'] * std_dev_multiplier)
+        df['lower_band'] = df['avwap'] - (df['std_dev'] * std_dev_multiplier)
+
+        return df.iloc[-1]
+
     except Exception as e:
-        logging.error(f"Failed to fetch historical data for token {instrument_token}: {e}")
+        logging.error(f"Failed to calculate AVWAP for {stock}: {e}")
         return None
-
-def calculate_avwap_bands(df, std_dev_multiplier):
-    df['TP'] = (df['high'] + df['low'] + df['close']) / 3
-    df['TPV'] = df['TP'] * df['volume']
-    df['cum_TPV'] = df['TPV'].cumsum()
-    df['cum_volume'] = df['volume'].cumsum()
-    df['avwap'] = df['cum_TPV'] / df['cum_volume']
-
-    # Calculate Standard Deviation for bands
-    df['sq_diff'] = ((df['close'] - df['avwap']) ** 2) * df['volume']
-    df['cum_sq_diff'] = df['sq_diff'].cumsum()
-    df['mean_sq_err'] = df['cum_sq_diff'] / df['cum_volume']
-    df['std_dev'] = np.sqrt(df['mean_sq_err'])
-
-    df['upper_band'] = df['avwap'] + (df['std_dev'] * std_dev_multiplier)
-    df['lower_band'] = df['avwap'] - (df['std_dev'] * std_dev_multiplier)
-    return df
 
 def place_mis_order(kite, tradingsymbol, transaction_type, quantity):
     try:
@@ -145,24 +146,14 @@ def place_mis_order(kite, tradingsymbol, transaction_type, quantity):
         logging.error(f"Failed to place MIS {transaction_type} order for {tradingsymbol}: {e}")
         return None
 
-from datetime import datetime, time as dt_time, timedelta
-
 def get_next_market_open_sleep_duration():
     now = datetime.now()
     market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-
-    # If it's already past market open today, calculate for tomorrow
-    if now > market_open:
+    if now.time() > market_open.time():
         market_open += timedelta(days=1)
-
-    # Handle weekends
-    if market_open.weekday() == 5: # Saturday
-        market_open += timedelta(days=2)
-    elif market_open.weekday() == 6: # Sunday
-        market_open += timedelta(days=1)
-
-    sleep_duration = (market_open - now).total_seconds()
-    return sleep_duration
+    if market_open.weekday() >= 5:
+        market_open += timedelta(days=(7 - market_open.weekday()))
+    return (market_open - now).total_seconds()
 
 # --- Main Bot Loop ---
 def run_bot():
@@ -178,108 +169,85 @@ def run_bot():
     daily_stop_loss = float(bot_config['DAILY_STOP_LOSS'])
     std_dev_multiplier = float(bot_config['AVWAP_STDDEV_MULTIPLIER'])
 
-    stock_of_the_day = None
+    stocks_to_trade = []
+    traded_stocks_today = set()
     trading_halted = False
 
     while True:
         try:
             now = datetime.now()
             market_open_time = dt_time(9, 15)
-            market_close_time = dt_time(15, 30)
+            market_close_time = dt_time(15, 15) # Square off before 3:15 PM
             select_time = dt_time(9, 30)
 
-            # --- Market Hours Logic ---
-            if now.time() > market_close_time:
-                logging.info("Market is closed for the day. Resetting for next day.")
-                stock_of_the_day = None
+            if now.time() > market_close_time or now.time() < market_open_time:
+                logging.info("Market is closed. Resetting for next day.")
+                stocks_to_trade = []
+                traded_stocks_today = set()
                 trading_halted = False
                 sleep_duration = get_next_market_open_sleep_duration()
                 logging.info(f"Sleeping for {sleep_duration/3600:.2f} hours until next market open.")
                 time.sleep(sleep_duration)
                 continue
 
-            if now.time() < market_open_time:
-                logging.info("Market is not open yet. Waiting...")
-                time.sleep(60)
-                continue
-
             if trading_halted:
-                logging.warning("Daily stop loss hit. No new trades will be placed today.")
                 time.sleep(300)
                 continue
 
-            # --- Select Stock of the Day at 9:30 AM ---
-            if not stock_of_the_day and now.time() >= select_time:
-                stock_of_the_day = get_stock_of_the_day(kite, stock_list)
-                if not stock_of_the_day:
-                    logging.error("Could not select a stock for today. Will retry tomorrow.")
-                    trading_halted = True # Don't try again today
-                    continue
+            if not stocks_to_trade and now.time() >= select_time:
+                # Placeholder for Advance/Decline logic
+                # A real implementation would need a reliable data source for this.
+                # For now, we default to a bullish view (trade top gainers).
+                is_market_bullish = True
 
-            if not stock_of_the_day:
-                logging.info("Waiting until 9:30 AM to select the stock of the day.")
+                top_gainers, top_losers = get_top_stocks(kite, stock_list)
+                stocks_to_trade = top_gainers if is_market_bullish else top_losers
+                logging.info(f"Selected stocks to trade for the day: {stocks_to_trade}")
+
+            if not stocks_to_trade:
+                logging.info("Waiting until 9:30 AM to select stocks.")
                 time.sleep(60)
                 continue
 
-            # --- Main Trading Logic (runs every 5 mins) ---
             positions = kite.positions()['net']
-            open_position = next((p for p in positions if p['tradingsymbol'] == stock_of_the_day and p['product'] == 'MIS'), None)
+            open_positions = {p['tradingsymbol']: p for p in positions if p['product'] == 'MIS' and p['quantity'] != 0}
 
-            instrument_token = kite.ltp(f"NSE:{stock_of_the_day}")[f"NSE:{stock_of_the_day}"]["instrument_token"]
-            df = fetch_historical_data(kite, instrument_token, interval='5minute')
+            for stock in stocks_to_trade:
+                if stock in traded_stocks_today: continue
 
-            if df is None or df.empty:
-                logging.warning(f"Could not fetch data for {stock_of_the_day}. Skipping this cycle.")
-                time.sleep(300)
-                continue
+                latest_data = fetch_and_calculate_avwap(kite, stock, std_dev_multiplier)
+                if latest_data is None: continue
 
-            df = calculate_avwap_bands(df, std_dev_multiplier)
-            last_row = df.iloc[-1]
-            ltp = last_row['close']
+                ltp = latest_data['close']
 
-            # Check for exits first
-            if open_position and open_position['quantity'] != 0:
-                is_long = open_position['quantity'] > 0
-                if is_long and ltp < last_row['lower_band']:
-                    logging.info(f"Exit Long Signal for {stock_of_the_day}. Price crossed below lower band.")
-                    place_mis_order(kite, stock_of_the_day, kite.TRANSACTION_TYPE_SELL, open_position['quantity'])
-                elif not is_long and ltp > last_row['upper_band']:
-                    logging.info(f"Exit Short Signal for {stock_of_the_day}. Price crossed above upper band.")
-                    place_mis_order(kite, stock_of_the_day, kite.TRANSACTION_TYPE_BUY, abs(open_position['quantity']))
+                if stock not in open_positions:
+                    if ltp > latest_data['upper_band']:
+                        qty = int(capital_per_trade / ltp)
+                        if qty > 0:
+                            place_mis_order(kite, stock, kite.TRANSACTION_TYPE_BUY, qty)
+                            traded_stocks_today.add(stock)
+                else:
+                    pos = open_positions[stock]
+                    if pos['quantity'] > 0 and ltp < latest_data['lower_band']:
+                        place_mis_order(kite, stock, kite.TRANSACTION_TYPE_SELL, pos['quantity'])
 
-            # Check for entries if no position
-            else:
-                qty = int(capital_per_trade / ltp)
-                if qty > 0:
-                    if ltp > last_row['upper_band']:
-                        logging.info(f"Long Entry Signal for {stock_of_the_day}. Price crossed above upper band.")
-                        place_mis_order(kite, stock_of_the_day, kite.TRANSACTION_TYPE_BUY, qty)
-                    elif ltp < last_row['lower_band']:
-                        logging.info(f"Short Entry Signal for {stock_of_the_day}. Price crossed below lower band.")
-                        place_mis_order(kite, stock_of_the_day, kite.TRANSACTION_TYPE_SELL, qty)
-
-            # --- Daily Stop Loss Check ---
             pnl = kite.pnl()
             if pnl and 'realised' in pnl:
                 daily_pnl = sum(p['pnl'] for p in pnl['realised'])
                 if daily_pnl <= daily_stop_loss:
-                    logging.critical(f"DAILY STOP LOSS HIT! Realized P&L: {daily_pnl:.2f}. Halting all new trades for the day.")
+                    logging.critical(f"DAILY STOP LOSS HIT! P&L: {daily_pnl:.2f}. Halting trades.")
                     trading_halted = True
 
-
-            time.sleep(300) # Sleep for 5 minutes
+            time.sleep(300)
 
         except KiteException as e:
             logging.error(f"Kite API Error: {e}")
             if e.code == 403:
-                logging.info("Token expired. Attempting to re-login.")
                 kite = kite_login(config)
-                if not kite:
-                    logging.error("Re-login failed. Exiting.")
-                    break
+                if not kite: break
             time.sleep(60)
         except Exception as e:
-            logging.error(f"An unexpected error occurred in the main loop: {e}")
+            logging.error(f"An unexpected error occurred: {e}", exc_info=True)
             time.sleep(60)
 
 if __name__ == '__main__':

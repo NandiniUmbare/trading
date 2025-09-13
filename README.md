@@ -1,20 +1,28 @@
-# Intraday AVWAP Breakout Trading Bot for Kite
+# Advanced Intraday Trading Bot for Kite
 
-This project contains a Python script for an automated intraday trading bot that connects to the Kite Connect API.
+This project contains a Python script for an automated intraday trading bot that connects to the Kite Connect API. It uses a dynamic stock selection strategy based on market sentiment and a breakout strategy based on Anchored VWAP.
 
 ## Strategy Overview
 
-The bot employs a momentum-based breakout strategy using an Anchored VWAP (AVWAP).
+The bot's logic is executed in two main phases:
 
-1.  **Stock Selection (at 9:30 AM):** At the start of the trading day, the bot identifies the top-performing stock from a predefined list of highly liquid stocks (configurable in `config.ini`).
-2.  **Indicator:** For the selected stock, it calculates an Anchored VWAP (AVWAP) starting from the 9:15 AM open, along with upper and lower standard deviation bands.
-3.  **Trading Signals (5-minute timeframe):**
-    *   **BUY (Long):** When the price breaks out and crosses **above the Upper AVWAP Band**.
-    *   **SELL (Short):** When the price breaks down and crosses **below the Lower AVWAP Band**.
-    *   **EXIT:** An open position (either long or short) is closed if the price crosses the opposite band.
-4.  **Risk Management:**
-    *   **Capital per Trade:** The bot allocates a fixed amount of capital (e.g., ₹10,000) for each trade.
-    *   **Daily Stop-Loss:** The bot will halt all new trading for the day if the total realized loss reaches a predefined limit (e.g., -₹3,000).
+### 1. Stock Selection (at 9:30 AM)
+At the start of the trading day, the bot determines the market sentiment and selects up to 3 stocks to trade:
+1.  **Market Sentiment:** It checks the Advance/Decline ratio of the stocks in your watchlist. (Note: This is a simplified proxy for market sentiment, as a live, full-market A/D ratio is not available via the API).
+2.  **Bullish Scenario (Advances > Declines):** The bot identifies the **top 3 performing stocks** from your watchlist based on the highest positive percentage change since the 9:15 AM open.
+3.  **Bearish Scenario (Declines >= Advances):** The bot identifies the **top 3 losing stocks** from your watchlist based on the highest negative percentage change.
+4.  These 3 stocks become the candidates for trading for the rest of the day.
+
+### 2. Trade Execution (5-minute Timeframe)
+For each of the selected stocks, the bot applies the following Anchored VWAP (AVWAP) breakout strategy:
+*   **Indicator:** It calculates an AVWAP anchored to the 9:15 AM open, along with upper and lower standard deviation bands.
+*   **BUY (Long) Signal:** When the price breaks out and crosses **above the Upper AVWAP Band**.
+*   **SELL (Short) Signal:** When the price breaks down and crosses **below the Lower AVWAP Band**.
+*   **Exit Signal:** An open position (either long or short) is closed if the price crosses the opposite band.
+
+### 3. Risk Management
+*   **Capital per Trade:** The bot allocates a fixed amount of capital (e.g., ₹10,000) for each new trade.
+*   **Daily Stop-Loss:** The bot will halt all new trading for the day if the total realized loss reaches a predefined limit (e.g., -₹3,000).
 
 ## How to Use
 
@@ -27,7 +35,7 @@ pip install -r requirements.txt
 ### 2. Configure the Bot
 1.  Open `config.ini` and fill in your Kite Connect API credentials under the `[KITE]` section.
 2.  Customize the parameters in the `[INTRADAY_AVWAP_BOT]` section:
-    *   `STOCKS_TO_MONITOR`: A comma-separated list of stock symbols to monitor.
+    *   `STOCKS_TO_MONITOR`: A comma-separated list of stock symbols to monitor for the selection process.
     *   `CAPITAL_PER_TRADE`: The amount of capital to allocate for each new trade.
     *   `DAILY_STOP_LOSS`: The maximum loss for the day (as a negative number) before the bot stops trading.
     *   `AVWAP_STDDEV_MULTIPLIER`: The multiplier for the standard deviation bands (e.g., 1.0, 2.0).
@@ -46,33 +54,8 @@ The first time you run the bot, it will need to generate a session. It will prin
 
 The bot will then save the generated `access_token` to `config.ini` and use it for future runs, minimizing the need for manual logins.
 
-### 5. Running Continuously
+### 4. Running Continuously
 This script is designed to run continuously throughout the trading day. For real-world use, you should run it on a server or a reliable machine using a process manager like `supervisor` (on Linux) or `tmux` to ensure it keeps running even if you disconnect.
 
 ### Disclaimer
 This script is for educational and demonstrational purposes only. Automated trading involves significant risk, including the risk of losing your entire investment. The author is not responsible for any financial losses incurred by using this script. **Always test thoroughly with a paper trading account before deploying with real money.**
-
----
-
-## Backtesting the Strategy
-
-The `correct_avwap_backtester.py` script is designed to accurately test the performance of the Intraday AVWAP Breakout strategy over the last year.
-
-### How it Works
-The backtester simulates the strategy day-by-day in a data-intensive but accurate manner:
-1.  **Data Pre-Fetching:** The script first downloads one year of 5-minute historical data for ALL stocks listed in your `STOCKS_TO_MONITOR` list.
-2.  **Daily Simulation:** It then loops through each trading day.
-3.  **Stock Selection:** For each day, it uses the pre-fetched data to accurately find the top-performing stock as of 9:30 AM.
-4.  **Strategy Execution:** It runs the AVWAP breakout strategy on that specific stock's 5-minute data for that single day.
-5.  **Results Aggregation:** It aggregates the results from all days to provide a final performance report, including total P&L and win rate.
-
-### How to Run the Backtester
-1.  Ensure you have followed the setup and configuration steps for the Intraday Bot.
-2.  Run the script from your terminal:
-    ```bash
-    python3 correct_avwap_backtester.py
-    ```
-3.  The script will prompt for your Kite credentials if it cannot log in with a saved session.
-
-### **IMPORTANT: Execution Time**
-This backtest is **extremely data-intensive** and will take a very long time to run. It needs to make thousands of API calls to fetch the initial data. Please be patient and let it run to completion to get the final results.
