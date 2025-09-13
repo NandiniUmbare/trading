@@ -1,7 +1,3 @@
-breeze-connect
-backtrader
+kiteconnect
 pandas
-requests
-beautifulsoup4
-lxml
-TA-Lib
+numpy
