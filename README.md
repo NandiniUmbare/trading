@@ -82,3 +82,48 @@ The `trading_terminal.py` script is a simple CLI application that allows you to 
 
 ### **NOTE**
 This is a basic implementation and does not include advanced features like error handling for all possible API responses, storing session tokens, or handling WebSocket connections for live data. It is intended as a starting point for building a more robust trading application.
+
+---
+
+## 3. ETF/MTF Algo Trading Bot
+
+The `etf_mtf_bot.py` script is a trading bot that automatically executes a strategy on ETFs using the Kite Connect API.
+
+### Strategy
+- **Universe:** All available ETFs on NSE.
+- **Timeframe:** 1 hour.
+- **Entry:** Place an MTF buy order when an ETF's close price is 2% below its 50-period EMA.
+- **Exit:** Sell the ETF when it reaches a 2% profit target.
+- **Capital:** Deploys a total capital of ₹100,000.
+
+### How to Use the Trading Bot
+
+1.  **Install TA-Lib (if needed):**
+    The bot uses the `TA-Lib` library for technical analysis. Installing this can be complex. If `pip install -r requirements.txt` fails at the `TA-Lib` step, you will need to install the TA-Lib C library on your system first.
+    - **For Ubuntu/Debian:** `sudo apt-get install libta-lib-dev`
+    - **For macOS:** `brew install ta-lib`
+    - **For Windows:** Download the `ta-lib-0.4.0-msvc.zip` file and follow instructions online.
+
+2.  **Install Dependencies:**
+    Once the TA-Lib library is set up, install the Python dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Configure the Bot:**
+    - Open the `config.ini` file.
+    - Enter your Kite `API_KEY` and `API_SECRET` in the `[KITE]` section.
+    - You can adjust the trading parameters in the `[TRADING]` section if needed.
+
+4.  **Run the Bot:**
+    ```bash
+    python3 etf_mtf_bot.py
+    ```
+
+5.  **First-time Login:**
+    - The first time you run the bot, it will fail to log in with an access token and will prompt you to perform a manual login.
+    - Follow the same login flow as the trading terminal: open the URL, log in, and paste the `request_token` from the redirect URL back into the terminal.
+    - The bot will save your `access_token` to `config.ini` and will use it for subsequent runs, attempting to log in automatically.
+
+6.  **Running Continuously:**
+    This script is designed to run continuously. For real-world use, you should run it on a server using a process manager like `supervisor` or `systemd`, or in a `screen` or `tmux` session to ensure it keeps running even if you disconnect.
