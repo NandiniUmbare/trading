@@ -51,3 +51,28 @@ This script is designed to run continuously throughout the trading day. For real
 
 ### Disclaimer
 This script is for educational and demonstrational purposes only. Automated trading involves significant risk, including the risk of losing your entire investment. The author is not responsible for any financial losses incurred by using this script. **Always test thoroughly with a paper trading account before deploying with real money.**
+
+---
+
+## Backtesting the Strategy
+
+The `correct_avwap_backtester.py` script is designed to accurately test the performance of the Intraday AVWAP Breakout strategy over the last year.
+
+### How it Works
+The backtester simulates the strategy day-by-day in a data-intensive but accurate manner:
+1.  **Data Pre-Fetching:** The script first downloads one year of 5-minute historical data for ALL stocks listed in your `STOCKS_TO_MONITOR` list.
+2.  **Daily Simulation:** It then loops through each trading day.
+3.  **Stock Selection:** For each day, it uses the pre-fetched data to accurately find the top-performing stock as of 9:30 AM.
+4.  **Strategy Execution:** It runs the AVWAP breakout strategy on that specific stock's 5-minute data for that single day.
+5.  **Results Aggregation:** It aggregates the results from all days to provide a final performance report, including total P&L and win rate.
+
+### How to Run the Backtester
+1.  Ensure you have followed the setup and configuration steps for the Intraday Bot.
+2.  Run the script from your terminal:
+    ```bash
+    python3 correct_avwap_backtester.py
+    ```
+3.  The script will prompt for your Kite credentials if it cannot log in with a saved session.
+
+### **IMPORTANT: Execution Time**
+This backtest is **extremely data-intensive** and will take a very long time to run. It needs to make thousands of API calls to fetch the initial data. Please be patient and let it run to completion to get the final results.
