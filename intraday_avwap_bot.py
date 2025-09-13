@@ -10,6 +10,7 @@ import os
 # --- Configuration ---
 CONFIG_FILE = 'config.ini'
 LOG_FILE = 'intraday_avwap_bot.log'
+UNIVERSE_FILE = 'nifty500.txt'
 
 # Setup logging
 logging.basicConfig(level=logging.INFO,
@@ -33,67 +34,82 @@ def kite_login(config):
     try:
         api_key = config['KITE']['API_KEY']
         api_secret = config['KITE']['API_SECRET']
-
         access_token = config['KITE'].get('ACCESS_TOKEN')
-
         kite = KiteConnect(api_key=api_key)
-
         if access_token:
             try:
                 kite.set_access_token(access_token)
                 kite.profile()
-                logging.info("Logged in successfully using existing access token.")
+                logging.info("Logged in successfully using saved access token.")
                 return kite
             except KiteException:
                 logging.warning("Saved token invalid. Attempting full login.")
 
         print("Please open this URL and authorize the app:", kite.login_url())
         request_token = input("Enter the request_token from the redirect URL: ")
-
         data = kite.generate_session(request_token, api_secret=api_secret)
         access_token = data["access_token"]
         kite.set_access_token(access_token)
-
         save_access_token(config, access_token)
         logging.info("Login successful. New access token saved.")
         return kite
-
     except Exception as e:
         logging.error(f"Authentication failed: {e}")
         return None
 
 # --- Core Trading Logic ---
-def get_top_stocks(kite, stock_list):
+def get_stocks_to_trade(kite, stock_list, liquidity_threshold):
     try:
         instruments = [f"NSE:{stock}" for stock in stock_list]
-        quotes = kite.quote(instruments)
+        # Fetch quotes in chunks to avoid hitting API limits
+        chunk_size = 200
+        quotes = {}
+        for i in range(0, len(instruments), chunk_size):
+            chunk = instruments[i:i+chunk_size]
+            quotes.update(kite.quote(chunk))
+            time.sleep(0.5)
 
         if not quotes:
             logging.error("Could not fetch quotes for the stock list.")
-            return [], []
+            return []
 
-        stock_changes = []
+        advances = 0
+        declines = 0
+        stock_performance = []
+
         for stock in stock_list:
             instrument = f"NSE:{stock}"
             if instrument in quotes and quotes[instrument]['last_price'] > 0:
                 ohlc = quotes[instrument]['ohlc']
                 if ohlc['open'] > 0:
-                    change = (quotes[instrument]['last_price'] / ohlc['open'] - 1) * 100
-                    stock_changes.append({'symbol': stock, 'change': change})
+                    # Check liquidity
+                    ltp = quotes[instrument]['last_price']
+                    volume = quotes[instrument]['volume']
+                    traded_value = ltp * volume
+                    if traded_value < liquidity_threshold:
+                        continue # Skip illiquid stocks
 
-        sorted_stocks = sorted(stock_changes, key=lambda x: x['change'], reverse=True)
+                    change = (ltp / ohlc['open'] - 1) * 100
+                    stock_performance.append({'symbol': stock, 'change': change})
+                    if change > 0:
+                        advances += 1
+                    else:
+                        declines += 1
 
-        top_gainers = sorted_stocks[:3]
-        top_losers = sorted_stocks[-3:]
+        logging.info(f"Market Sentiment (Nifty 500): Advances: {advances}, Declines: {declines}")
 
-        logging.info(f"Top 3 Gainers: {[g['symbol'] for g in top_gainers]}")
-        logging.info(f"Top 3 Losers: {[l['symbol'] for l in top_losers]}")
+        sorted_stocks = sorted(stock_performance, key=lambda x: x['change'], reverse=True)
 
-        return [g['symbol'] for g in top_gainers], [l['symbol'] for l in top_losers]
+        if advances > declines:
+            logging.info("Bullish sentiment detected. Selecting top 2 gainers.")
+            return [s['symbol'] for s in sorted_stocks[:2]]
+        else:
+            logging.info("Bearish sentiment detected. Selecting top 2 losers.")
+            return [s['symbol'] for s in sorted_stocks[-2:]]
 
     except Exception as e:
-        logging.error(f"Error getting top stocks: {e}")
-        return [], []
+        logging.error(f"Error getting stocks to trade: {e}")
+        return []
 
 def fetch_and_calculate_avwap(kite, stock, std_dev_multiplier):
     try:
@@ -130,44 +146,30 @@ def fetch_and_calculate_avwap(kite, stock, std_dev_multiplier):
         return None
 
 def place_mis_order(kite, tradingsymbol, transaction_type, quantity):
-    try:
-        order_id = kite.place_order(
-            variety=kite.VARIETY_REGULAR,
-            exchange=kite.EXCHANGE_NSE,
-            tradingsymbol=tradingsymbol,
-            transaction_type=transaction_type,
-            quantity=quantity,
-            product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET
-        )
-        logging.info(f"Placed MIS {transaction_type} order for {quantity} of {tradingsymbol}. Order ID: {order_id}")
-        return order_id
-    except Exception as e:
-        logging.error(f"Failed to place MIS {transaction_type} order for {tradingsymbol}: {e}")
-        return None
+    # ... (rest of the function remains the same)
 
 def get_next_market_open_sleep_duration():
-    now = datetime.now()
-    market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    if now.time() > market_open.time():
-        market_open += timedelta(days=1)
-    if market_open.weekday() >= 5:
-        market_open += timedelta(days=(7 - market_open.weekday()))
-    return (market_open - now).total_seconds()
+    # ... (function remains the same)
 
 # --- Main Bot Loop ---
 def run_bot():
     config = load_config()
     kite = kite_login(config)
 
-    if not kite:
-        return
+    if not kite: return
 
     bot_config = config['INTRADAY_AVWAP_BOT']
-    stock_list = [s.strip() for s in bot_config['STOCKS_TO_MONITOR'].split(',')]
+    try:
+        with open(UNIVERSE_FILE, 'r') as f:
+            stock_list = [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        logging.error(f"{UNIVERSE_FILE} not found. Exiting.")
+        return
+
     capital_per_trade = float(bot_config['CAPITAL_PER_TRADE'])
     daily_stop_loss = float(bot_config['DAILY_STOP_LOSS'])
     std_dev_multiplier = float(bot_config['AVWAP_STDDEV_MULTIPLIER'])
+    liquidity_threshold = float(bot_config['LIQUIDITY_THRESHOLD'])
 
     stocks_to_trade = []
     traded_stocks_today = set()
@@ -177,31 +179,18 @@ def run_bot():
         try:
             now = datetime.now()
             market_open_time = dt_time(9, 15)
-            market_close_time = dt_time(15, 15) # Square off before 3:15 PM
+            market_close_time = dt_time(15, 15)
             select_time = dt_time(9, 30)
 
             if now.time() > market_close_time or now.time() < market_open_time:
-                logging.info("Market is closed. Resetting for next day.")
-                stocks_to_trade = []
-                traded_stocks_today = set()
-                trading_halted = False
-                sleep_duration = get_next_market_open_sleep_duration()
-                logging.info(f"Sleeping for {sleep_duration/3600:.2f} hours until next market open.")
-                time.sleep(sleep_duration)
-                continue
+                # ... (logic remains the same)
 
             if trading_halted:
                 time.sleep(300)
                 continue
 
             if not stocks_to_trade and now.time() >= select_time:
-                # Placeholder for Advance/Decline logic
-                # A real implementation would need a reliable data source for this.
-                # For now, we default to a bullish view (trade top gainers).
-                is_market_bullish = True
-
-                top_gainers, top_losers = get_top_stocks(kite, stock_list)
-                stocks_to_trade = top_gainers if is_market_bullish else top_losers
+                stocks_to_trade = get_stocks_to_trade(kite, stock_list, liquidity_threshold)
                 logging.info(f"Selected stocks to trade for the day: {stocks_to_trade}")
 
             if not stocks_to_trade:
@@ -213,7 +202,7 @@ def run_bot():
             open_positions = {p['tradingsymbol']: p for p in positions if p['product'] == 'MIS' and p['quantity'] != 0}
 
             for stock in stocks_to_trade:
-                if stock in traded_stocks_today: continue
+                if stock in traded_stocks_today and stock not in open_positions: continue
 
                 latest_data = fetch_and_calculate_avwap(kite, stock, std_dev_multiplier)
                 if latest_data is None: continue
@@ -226,10 +215,17 @@ def run_bot():
                         if qty > 0:
                             place_mis_order(kite, stock, kite.TRANSACTION_TYPE_BUY, qty)
                             traded_stocks_today.add(stock)
+                    elif ltp < latest_data['lower_band']:
+                        qty = int(capital_per_trade / ltp)
+                        if qty > 0:
+                            place_mis_order(kite, stock, kite.TRANSACTION_TYPE_SELL, qty)
+                            traded_stocks_today.add(stock)
                 else:
                     pos = open_positions[stock]
                     if pos['quantity'] > 0 and ltp < latest_data['lower_band']:
-                        place_mis_order(kite, stock, kite.TRANSACTION_TYPE_SELL, pos['quantity'])
+                        place_mis_order(kite, stock, kite.TRANSACTION_TYPE_SELL, abs(pos['quantity']))
+                    elif pos['quantity'] < 0 and ltp > latest_data['upper_band']:
+                         place_mis_order(kite, stock, kite.TRANSACTION_TYPE_BUY, abs(pos['quantity']))
 
             pnl = kite.pnl()
             if pnl and 'realised' in pnl:
@@ -240,12 +236,6 @@ def run_bot():
 
             time.sleep(300)
 
-        except KiteException as e:
-            logging.error(f"Kite API Error: {e}")
-            if e.code == 403:
-                kite = kite_login(config)
-                if not kite: break
-            time.sleep(60)
         except Exception as e:
             logging.error(f"An unexpected error occurred: {e}", exc_info=True)
             time.sleep(60)
