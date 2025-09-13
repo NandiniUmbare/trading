@@ -1,0 +1,6 @@
+pya3
+backtrader
+pandas
+requests
+beautifulsoup4
+lxml
